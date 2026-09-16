@@ -1,0 +1,491 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../app/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Role {
+  CUSTOMER
+  ADMIN
+  OPERATOR
+  MANAGEMENT
+}
+
+enum OrderStatus {
+  PENDING_PAYMENT
+  WAITING_APPROVAL
+  IN_PRODUCTION
+  READY_FOR_PICKUP
+  COMPLETED
+  CANCELLED
+}
+
+enum PaymentStatus {
+  PENDING
+  PAID
+  FAILED
+  REFUNDED
+}
+
+enum ProductionStatus {
+  QUEUE
+  PRINTING
+  FINISHING
+  QC_CHECK
+  DONE
+}
+
+enum QCStatus {
+  PASSED
+  REJECTED
+  NEEDS_REWORK
+}
+
+enum InventoryLogType {
+  IN
+  OUT
+}
+
+// TAMBAHAN: Status Mesin
+enum MachineStatus {
+  AVAILABLE
+  IN_USE
+  MAINTENANCE
+}
+
+enum ExpenseCategory {
+  OPERASIONAL
+  BAHAN_BAKU
+  LISTRIK
+  MAINTENANCE
+  LAINNYA
+}
+
+enum FinancialTransactionType {
+  PEMASUKAN
+  PENGELUARAN
+}
+
+enum MachineMaintenanceType {
+  RUTIN
+  PERBAIKAN
+  INSPEKSI
+}
+
+enum PromoType {
+  DISKON_PERSEN
+  DISKON_NOMINAL
+  VOUCHER
+  BUNDLING
+}
+
+enum QCChecklistStatus {
+  PASSED
+  REJECTED
+  NEEDS_REWORK
+}
+
+enum SchedulePriority {
+  URGENT
+  NORMAL
+  LOW
+}
+
+// ================= MODELS =================
+
+// 1. PENGGUNA & AUTENTIKASI (Tetap milikmu)
+model User {
+  id            String           @id @default(uuid())
+  name          String
+  email         String           @unique
+  passwordHash  String
+  phone         String?
+  role          Role             @default(CUSTOMER)
+  
+  orders        Order[]          @relation("CustomerOrders")
+  jobsHandled   ProductionJob[]  @relation("OperatorJobs")
+  qcInspections QualityControl[] @relation("QCInspector")
+  notifications Notification[]
+
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+}
+
+// 2. KATALOG & PRODUK
+model Category {
+  id        String    @id @default(uuid())
+  name      String
+  products  Product[]
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+}
+
+model Product {
+  id          String    @id @default(uuid())
+  categoryId  String
+  name        String
+  description String?
+  basePrice   Float
+  unit        String    
+  imageUrl    String?   
+  
+  category    Category  @relation(fields: [categoryId], references: [id])
+  orderItems  OrderItem[]
+  
+  // Template desain yang disediakan admin untuk produk ini
+  designs     ProductDesign[]
+  
+  // TAMBAHAN: Relasi ke bahan baku (Resep/BOM) untuk pemotongan otomatis
+  materials   ProductMaterial[]
+
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+}
+
+model ProductDesign {
+  id          String    @id @default(uuid())
+  productId   String
+  title       String
+  imageUrl    String
+
+  product     Product   @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+}
+
+// TAMBAHAN: Tabel Perantara Produk & Material (Bill of Materials)
+model ProductMaterial {
+  id           String   @id @default(uuid())
+  productId    String
+  materialId   String
+  qtyNeeded      Float    // Berapa banyak bahan ini dipakai untuk 1 unit produk
+  
+  product      Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  material     Material @relation(fields: [materialId], references: [id], onDelete: Cascade)
+}
+
+// 3. INVENTARIS & BAHAN BAKU
+// TAMBAHAN: Sesuai proposal "integrasi dengan supplier"
+model Supplier {
+  id        String     @id @default(uuid())
+  name      String
+  contact   String
+  materials Material[]
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+}
+
+model Material {
+  id         String         @id @default(uuid())
+  name       String
+  stockQty   Float          @default(0)
+  minStock   Float          @default(10)
+  unit       String         
+  
+  supplierId String?
+  supplier   Supplier?      @relation(fields: [supplierId], references: [id])
+  
+  logs             InventoryLog[]
+  productMaterials ProductMaterial[] // Relasi balik dari tabel resep
+
+  createdAt  DateTime       @default(now())
+  updatedAt  DateTime       @updatedAt
+}
+
+model InventoryLog {
+  id         String           @id @default(uuid())
+  materialId String
+  type       InventoryLogType
+  qty        Float
+  notes      String?          
+  
+  material   Material         @relation(fields: [materialId], references: [id])
+
+  createdAt  DateTime         @default(now())
+}
+
+// 4. PESANAN & PEMBAYARAN
+model Order {
+  id          String      @id @default(uuid())
+  orderNumber String      @unique 
+  customerId  String
+  status      OrderStatus @default(PENDING_PAYMENT)
+  totalAmount Float
+  deadline    DateTime?
+  
+  customer    User        @relation("CustomerOrders", fields: [customerId], references: [id])
+  items       OrderItem[]
+  payment     Payment?    
+  
+  // TAMBAHAN: Relasi Arsip Digital
+  archives    Archive[]
+
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+}
+
+model OrderItem {
+  id             String         @id @default(uuid())
+  orderId        String
+  productId      String
+  qty            Int
+  specifications Json           
+  fileUrl        String?        
+  subtotal       Float
+
+  order          Order          @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  product        Product        @relation(fields: [productId], references: [id])
+  productionJob  ProductionJob? 
+
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+}
+
+model Payment {
+  id        String        @id @default(uuid())
+  orderId   String        @unique
+  amount    Float
+  method    String?       
+  status    PaymentStatus @default(PENDING)
+  proofUrl  String?       
+  
+  order     Order         @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  paidAt    DateTime?
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+}
+
+// TAMBAHAN: Modul Mesin Cetak (Sesuai proposal "alokasi mesin cetak")
+model Machine {
+  id             String                @id @default(uuid())
+  name           String
+  status         MachineStatus         @default(AVAILABLE)
+  productionJobs ProductionJob[]
+  maintenanceLogs MachineMaintenanceLog[] @relation("MaintenanceLogs")
+  schedules      MaintenanceSchedule[]  @relation("MaintenanceSchedules")
+  createdAt      DateTime              @default(now())
+}
+
+// 5. PRODUKSI & QUALITY CONTROL (QC)
+model ProductionJob {
+  id          String               @id @default(uuid())
+  orderItemId String               @unique
+  operatorId  String?
+  status      ProductionStatus     @default(QUEUE)
+
+  machineId   String?
+  machine     Machine?             @relation(fields: [machineId], references: [id])
+
+  notes       String?
+
+  orderItem   OrderItem            @relation(fields: [orderItemId], references: [id], onDelete: Cascade)
+  operator    User?                @relation("OperatorJobs", fields: [operatorId], references: [id])
+  qcRecord    QualityControl?
+  qcItems     QCChecklistItem[]    @relation("QCItems")
+  photos      PhotoRecord[]        @relation("PhotoRecords")
+  schedules   ProductionSchedule[] @relation("Schedules")
+
+  startedAt   DateTime?
+  completedAt DateTime?
+  createdAt   DateTime             @default(now())
+  updatedAt   DateTime             @updatedAt
+}
+
+model QualityControl {
+  id              String        @id @default(uuid())
+  productionJobId String        @unique
+  inspectorId     String
+  status          QCStatus
+  notes           String?       
+
+  productionJob   ProductionJob @relation(fields: [productionJobId], references: [id], onDelete: Cascade)
+  inspector       User          @relation("QCInspector", fields: [inspectorId], references: [id])
+
+  checkedAt       DateTime      @default(now())
+}
+
+// 6. SISTEM NOTIFIKASI & ARSIP
+model Notification {
+  id        String   @id @default(uuid())
+  userId    String
+  title     String
+  message   String
+  isRead    Boolean  @default(false)
+  linkUrl   String?  
+
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+}
+
+// TAMBAHAN: Modul Arsip Manajemen (Sesuai Bab 2.1 proposal)
+model Archive {
+  id          String   @id @default(uuid())
+  orderId     String
+  documentUrl String
+  title       String
+
+  order       Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  createdAt   DateTime @default(now())
+}
+
+model FinancialCategory {
+  id           String                  @id @default(uuid())
+  name         String
+  type         FinancialTransactionType
+  transactions FinancialTransaction[]
+  createdAt    DateTime                @default(now())
+}
+
+model FinancialTransaction {
+  id         String                  @id @default(uuid())
+  categoryId String
+  type       FinancialTransactionType
+  amount     Float
+  description String?
+
+  category   FinancialCategory       @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+
+  createdAt  DateTime                @default(now())
+  updatedAt  DateTime                @updatedAt
+}
+
+model MachineMaintenanceLog {
+  id          String                  @id @default(uuid())
+  machineId   String
+  type        MachineMaintenanceType
+  description String?
+  cost        Float?
+
+  machine     Machine                 @relation("MaintenanceLogs", fields: [machineId], references: [id], onDelete: Cascade)
+
+  createdAt   DateTime                @default(now())
+}
+
+model MaintenanceSchedule {
+  id          String    @id @default(uuid())
+  machineId   String
+  interval    Int
+  lastDone    DateTime?
+  nextDue     DateTime
+  notes       String?
+
+  machine     Machine   @relation("MaintenanceSchedules", fields: [machineId], references: [id], onDelete: Cascade)
+
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+}
+
+model Promotion {
+  id         String    @id @default(uuid())
+  name       String
+  type       PromoType
+  value      Float
+  startDate  DateTime
+  endDate    DateTime
+  active     Boolean   @default(true)
+
+  vouchers   VoucherCode[]
+  usages     PromoUsage[]
+
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+}
+
+model VoucherCode {
+  id          String    @id @default(uuid())
+  code        String    @unique
+  promotionId String
+  used        Boolean   @default(false)
+  usedAt      DateTime?
+
+  promotion   Promotion @relation(fields: [promotionId], references: [id], onDelete: Cascade)
+  usage       PromoUsage?
+
+  createdAt   DateTime  @default(now())
+}
+
+model PromoUsage {
+  id           String       @id @default(uuid())
+  promotionId  String
+  voucherCodeId String?      @unique
+  orderId      String?
+  discountAmount Float
+
+  promotion    Promotion    @relation(fields: [promotionId], references: [id], onDelete: Cascade)
+  voucher      VoucherCode? @relation(fields: [voucherCodeId], references: [id], onDelete: SetNull)
+
+  createdAt    DateTime     @default(now())
+}
+
+model QCChecklistItem {
+  id                String            @id @default(uuid())
+  productionJobId   String
+  checkName         String
+  status            QCChecklistStatus
+  notes             String?
+
+  productionJob     ProductionJob     @relation("QCItems", fields: [productionJobId], references: [id], onDelete: Cascade)
+
+  createdAt         DateTime          @default(now())
+}
+
+model PhotoRecord {
+  id              String            @id @default(uuid())
+  productionJobId String
+  photoUrl        String
+  notes           String?
+
+  productionJob   ProductionJob     @relation("PhotoRecords", fields: [productionJobId], references: [id], onDelete: Cascade)
+
+  createdAt       DateTime          @default(now())
+}
+
+model ProductionSchedule {
+  id              String              @id @default(uuid())
+  productionJobId String
+  machineId       String?
+  operatorId      String?
+  scheduledDate   DateTime
+  priority        SchedulePriority    @default(NORMAL)
+  status          String              @default("scheduled")
+  notes           String?
+
+  productionJob   ProductionJob       @relation("Schedules", fields: [productionJobId], references: [id], onDelete: Cascade)
+
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+}
+
+model BundleProduct {
+  id           String   @id @default(uuid())
+  name         String
+  description  String?
+  bundlePrice  Float
+  active       Boolean  @default(true)
+  products     String   @default("[]")
+
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+model MaterialEstimate {
+  id           String   @id @default(uuid())
+  orderId      String?
+  materialId   String
+  estimatedQty Float
+  actualQty    Float?
+  notes        String?
+
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
